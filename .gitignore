@@ -1,0 +1,15 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Local config
+.env
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+ASSIGNMENT.md
