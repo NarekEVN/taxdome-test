@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: payments
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: payments
+    ports:
+      # 5433 on the host so it doesn't clash with a locally installed Postgres.
+      - "5433:5432"
+    volumes:
+      # Init scripts run in filename order, only when the data volume is empty.
+      # After editing them: docker compose down -v
+      - ./db:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # TCP, not the socket: during init the temporary server listens on the socket only,
+      # so a socket check would report healthy before the seed has run.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U payments -d payments"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:

@@ -39,6 +39,8 @@ Goal: `docker compose up db` gives a Postgres 16 with the assignment's seed, plu
       `TEST_DATABASE_URL=...5433/payments_test`.
 
 Gotcha: init scripts run **only on an empty data volume**. After editing SQL, run `docker compose down -v`.
+Gotcha (hit during implementation): `pg_isready` over the Unix socket reports healthy while the init scripts are still
+running, because the temporary init server listens on the socket only. The healthcheck uses `-h 127.0.0.1`.
 Note: `000_create_test_db.sql` runs first (alphabetical), but `001`/`002` then run against `payments` only. The
 test DB gets its schema from the test fixtures (Step 4), which is what we want.
 
