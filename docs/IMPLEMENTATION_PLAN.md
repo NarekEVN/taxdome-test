@@ -247,6 +247,20 @@ Commit: `feat: Dockerfile, 2 app replicas behind nginx`
 
 Verify: a fresh clone + `make up && make demo` works with no other steps (this is exactly what reviewers will do).
 
+**Result:**
+- `Makefile`: also `env` (creates `.env` only if missing; `cp -n` exits non-zero on macOS when the file exists) and
+  `run` (one local instance with reload). `make` with no target prints help.
+- `scripts/reset_db.sh`: shared by both demos. It truncates and reseeds through `docker compose exec`, using the db
+  container's own `$POSTGRES_USER` / `$POSTGRES_DB`, so no credentials appear in scripts.
+- `scripts/demo.sh`: seed → sample (201, shows the serving instance) → balances → a denied Lopez request (422,
+  balances unchanged) → exits non-zero unless the balances are exactly 3674875 / 170075 / 1405050. The planned
+  "POST the sample again" step was left out; `test_repeated_sample_until_funds_run_out` covers it.
+- `scripts/concurrency_demo.sh`: `REQUESTS` (default 40) parallel $25 payments from Lopez ($500). Prints counts per
+  instance and status. Exits non-zero unless exactly min(N, 20) succeed, the rest are denied, rows match, and the total
+  money is unchanged.
+- Checked from an empty volume: `make install && make reset && make demo && make concurrency-demo && make test` all
+  pass. A real fresh-clone run is left for Step 11, because this step isn't committed yet.
+
 Commit: `chore: Makefile and demo scripts`
 
 ## Step 10 — README (written as a PR description)
