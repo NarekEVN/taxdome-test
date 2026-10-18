@@ -144,6 +144,8 @@ TECH_SPEC §6.2 exactly. No HTTP imports in services or repositories.
       RETURNING id`. To guarantee request order, either use `INSERT ... SELECT ... FROM unnest(...) WITH ORDINALITY
       ... ORDER BY ordinality RETURNING id` or sort the returned ids (identity values are assigned in insert order
       within one statement). Pick one and comment why.
+      **Decided:** SQLAlchemy's `returning(..., sort_by_parameter_order=True)`. It generates exactly the
+      `INSERT ... SELECT ... FROM (VALUES ..., n) ORDER BY n RETURNING` form, so we don't hand-write it.
 - [ ] Service transaction, inside `with engine.begin() as conn:` (one transaction, READ COMMITTED):
   1. `lock_by_uuids`.
   2. Map uuid → row. Missing payer → `UnknownPayerFirm`. Missing payees → `UnknownPayeeFirm(details=[...])`.
@@ -153,6 +155,8 @@ TECH_SPEC §6.2 exactly. No HTTP imports in services or repositories.
       `err.orig.sqlstate in {"40P01", "40001"}`, up to 3 attempts with 10–50 ms jitter, then raise
       `TransientDbError`. Never retry `DomainError`.
 - [ ] Return a plain dataclass result (payer uuid, total, list of `(id, payee_uuid, amount_cents, description)`).
+- Note: repositories use SQLAlchemy Core constructs, not raw `text()`. The SQL actually sent to Postgres was checked
+  against §6.2 (one `... ORDER BY id FOR UPDATE`, one insert, one debit, one `UPDATE ... FROM (VALUES ...)`).
 
 Verify: `tests/integration/test_bulk_payment_service.py` calling `create_bulk_payment` directly with the test engine:
 sample request → balances `3674875 / 170075 / 1405050`, 3 rows; insufficient → raises, nothing written;

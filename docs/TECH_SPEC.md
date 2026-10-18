@@ -194,7 +194,7 @@ Inside **one transaction** (READ COMMITTED, Postgres default):
 -- 1. Lock every involved firm row, always in ascending id order.
 SELECT id, uuid, balance_cents
 FROM firms
-WHERE uuid = ANY(:uuids)            -- payer + distinct payees
+WHERE uuid IN (:uuid_1, ...)        -- payer + distinct payees
 ORDER BY id
 FOR UPDATE;
 ```
@@ -203,7 +203,8 @@ FOR UPDATE;
    - payer missing → rollback, `unknown_payer_firm`
    - any payee missing → rollback, `unknown_payee_firm`
    - `payer.balance_cents < total` → rollback, `insufficient_funds`
-3. Insert all payments in one multi-row statement, `RETURNING id` (request order preserved).
+3. Insert all payments in one multi-row statement, `RETURNING id`. Request order is guaranteed by SQLAlchemy's
+   `sort_by_parameter_order=True` (Postgres alone doesn't promise RETURNING order for multi-row inserts).
 4. `UPDATE firms SET balance_cents = balance_cents - :total WHERE id = :payer_id`
 5. Credit payees with aggregated amounts, one statement:
    ```sql
