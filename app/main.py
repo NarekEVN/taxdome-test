@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.error_handlers import register_exception_handlers
-from app.api.routes import firms, health
+from app.api.routes import bulk_payments, firms, health
 from app.core.config import DatabaseSettings, get_database_settings
 from app.core.database import create_db_engine
 
@@ -21,4 +21,5 @@ def create_app(database_settings: DatabaseSettings | None = None) -> FastAPI:
     register_exception_handlers(app)
     app.include_router(health.router)
     app.include_router(firms.router)
+    app.include_router(bulk_payments.router)
     return app
