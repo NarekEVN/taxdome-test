@@ -1,0 +1,14 @@
+.git
+.venv
+.idea
+.vscode
+.env
+.env.*
+**/__pycache__
+.pytest_cache
+.ruff_cache
+ai-logs
+docs
+tests
+scripts
+db

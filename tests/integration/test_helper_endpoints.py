@@ -41,3 +41,7 @@ def test_get_firm_with_malformed_uuid(client):
     resp = client.get("/firms/not-a-uuid")
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "validation_error"
+
+
+def test_responses_carry_instance_header(client):
+    assert client.get("/health").headers["X-Instance"]

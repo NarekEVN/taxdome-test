@@ -15,7 +15,7 @@ Goal: an empty but installable, lintable, testable Python project.
 - [ ] `.gitignore`: `.venv/`, `__pycache__/`, `.pytest_cache/`, `.ruff_cache/`, `.env`, `.idea/workspace.xml`
       (keep or drop the rest of `.idea/`, your call; most repos ignore all of it).
 - [ ] Python 3.11 venv: `python3.11 -m venv .venv && source .venv/bin/activate`.
-- [ ] `requirements.txt` (runtime, exact pins): `fastapi`, `uvicorn[standard]`, `gunicorn`, `sqlalchemy>=2`,
+- [ ] `requirements.txt` (runtime, exact pins): `fastapi`, `uvicorn[standard]`, `sqlalchemy>=2`,
       `psycopg[binary]>=3`, `pydantic>=2`, `pydantic-settings`.
 - [ ] `requirements-dev.txt`: `-r requirements.txt`, `pytest`, `httpx`, `ruff`.
 - [ ] `pyproject.toml`: ruff config (line length, rule set `E,F,I,B,UP`), pytest config (`testpaths = ["tests"]`).
@@ -33,11 +33,12 @@ Goal: `docker compose up db` gives a Postgres 16 with the assignment's seed, plu
 
 - [ ] `db/000_create_test_db.sql`: `CREATE DATABASE payments_test;`
 - [ ] `db/001_schema.sql`, `db/002_seed.sql`: copy from TECH_SPEC §3 verbatim.
-- [ ] `docker-compose.yml` with only the `db` service for now: `postgres:16`, env `POSTGRES_DB=payments`,
-      user/password, volume `./db:/docker-entrypoint-initdb.d:ro`, named data volume, healthcheck `pg_isready`,
+- [ ] `docker-compose.yml` with only the `db` service for now: `postgres:16`, `POSTGRES_DB`/`USER`/`PASSWORD`
+      interpolated from `.env` as `${VAR:-postgres}` (generic placeholder defaults, so compose also runs
+      without `.env`; the project's real values live only in `.env`), volume `./db:/docker-entrypoint-initdb.d:ro`, named data volume, healthcheck `pg_isready`,
       port `5433:5432` (5433 avoids clashing with a local Postgres).
-- [ ] `.env.example`: `DATABASE_URL=postgresql+psycopg://payments:payments@localhost:5433/payments` and
-      `TEST_DATABASE_URL=...5433/payments_test`.
+- [ ] `.env.example`: `POSTGRES_USER`/`PASSWORD`/`DB`, host-side `DATABASE_URL` and `TEST_DATABASE_URL`
+      (`localhost:5433`), and `APP_DATABASE_URL` (`db:5432`) for the app containers.
 
 Gotcha: init scripts run **only on an empty data volume**. After editing SQL, run `docker compose down -v`.
 Gotcha (hit during implementation): `pg_isready` over the Unix socket reports healthy while the init scripts are still
@@ -78,7 +79,7 @@ Goal: all validation from TECH_SPEC §5 runs before any DB access, and every err
 - [ ] `app/core/config.py`: `DatabaseSettings` (`database_url` **required, no default**, `db_pool_size`,
       `db_max_overflow`) and `ApiSettings` (`max_payments_per_request = 1000`), each with a cached getter.
       Split so request validation never needs database config. Connection strings live only in the environment
-      (`.env`, compose `environment:`), never in code.
+      (`.env`), never in code or in committed config such as `docker-compose.yml`.
 - [ ] `app/schemas/types.py` (shared `FirmUuid`, `Amount`, `Description`) and `app/schemas/bulk_payment.py` (Pydantic v2, `model_config = ConfigDict(extra="forbid")` on every model):
   - `PaymentIn`: `amount: StrictStr` → validator calls `parse_amount_to_cents`, keeps cents on the model
     (e.g. a computed/private `amount_cents`); `payee_firm_uuid: str` → validator `str(uuid.UUID(v))` (lowercase
@@ -115,7 +116,7 @@ Goal: a running app that talks to Postgres, and a test harness that gives each t
 - [ ] `app/api/routes/firms.py`: `GET /firms/{uuid}` → `FirmOut` or 404.
 - [ ] `app/main.py`: `create_app(database_settings=None)` builds the engine, stores it on `app.state`, includes the
       routers, disposes the engine on shutdown. No module-level `app`: importing the package never needs config,
-      and servers use the factory (`uvicorn --factory`, gunicorn `'app.main:create_app()'`).
+      and servers use the factory (`uvicorn --factory app.main:create_app`).
 - [ ] `tests/integration/conftest.py`:
   - session fixture: engine on `TEST_DATABASE_URL` (read from the environment / `.env`, no default; fail with a
     clear message if unset); drop and recreate tables by running `db/001_schema.sql`.
@@ -213,9 +214,13 @@ Commit: `test: concurrency tests for overdraft, deadlock and conservation`
 Goal: the "multiple load-balanced instances" requirement runs locally.
 
 - [ ] `Dockerfile`: `python:3.11-slim`, install `requirements.txt`, copy `app/`, non-root user,
-      `CMD gunicorn 'app.main:create_app()' -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:8000`.
+      `CMD uvicorn --factory app.main:create_app --host 0.0.0.0 --port 8000 --workers 2`.
+      **Decided:** no gunicorn. `uvicorn.workers.UvicornWorker` is deprecated (moved to the separate
+      `uvicorn-worker` package), and uvicorn's own `--workers` supervisor restarts dead workers, which was
+      the reason to use gunicorn. One fewer dependency.
 - [ ] Compose: `app` service with `deploy.replicas: 2` (or `app1`/`app2`, which is explicit and works everywhere),
-      `depends_on: db: condition: service_healthy`, `DATABASE_URL` pointing at `db:5432`.
+      `depends_on: db: condition: service_healthy`, `DATABASE_URL: ${APP_DATABASE_URL:-...}` from `.env`, defaulting to a URL built from the same
+      `POSTGRES_*` defaults so the two can't disagree.
 - [ ] `nginx.conf`: `upstream app { server app1:8000; server app2:8000; }` (or Docker DNS for replicas),
       listen 8080. Add an `X-Instance` response header (hostname) from the app so the demo can show requests
       landing on different replicas.
@@ -223,6 +228,12 @@ Goal: the "multiple load-balanced instances" requirement runs locally.
       `max_connections` (default 100).
 
 Verify: `docker compose up --build -d`, then `curl -i localhost:8080/health` a few times and check `X-Instance` alternates.
+
+**Result:** `X-Instance` (`<hostname>:<pid>`) alternates between `app1` and `app2`. 40 parallel $25 payments
+from Lopez ($500) through nginx: app1 served 19, app2 served 21; exactly 20 × 201 and 20 × 422 overall, Lopez
+ends at 0, 20 rows. The full test suite also passes with the stack running (connection budget: 40 for the stack +
+50 for the concurrency tests, under Postgres' 100). Right after startup, the first few requests all went to
+app1. It didn't happen again and nginx logged no upstream errors, so it was likely a startup timing effect.
 
 Commit: `feat: Dockerfile, 2 app replicas behind nginx`
 

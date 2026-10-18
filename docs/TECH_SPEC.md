@@ -30,7 +30,7 @@ Hard constraints:
 | Validation         | **Pydantic v2**                          | Comes with FastAPI. |
 | DB access          | **SQLAlchemy 2.x Core** + **psycopg 3**  | Standard pooling/engine; we write explicit SQL so the locking is visible to reviewers. No ORM magic in the critical path. |
 | Database           | **PostgreSQL 16** (Docker)               | Row-level locks, `CHECK` constraints, `FOR UPDATE`. |
-| App server         | **uvicorn** (dev) / **gunicorn + uvicorn workers** (compose) | Standard. |
+| App server         | **uvicorn** (`--reload` in dev, `--workers 2` in compose) | Standard. Its worker supervisor replaces gunicorn, whose `UvicornWorker` is deprecated. |
 | Load balancer demo | **nginx** in front of 2 app replicas      | Proves the multi-instance requirement locally. |
 | Tests              | **pytest**, FastAPI `TestClient` (httpx2, which Starlette now requires in place of httpx) | Standard. Tests run against a real Postgres, not SQLite (locking semantics matter). |
 | Lint/format        | **ruff**                                 | Standard, fast. |
