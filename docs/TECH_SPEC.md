@@ -32,9 +32,9 @@ Hard constraints:
 | Database           | **PostgreSQL 16** (Docker)               | Row-level locks, `CHECK` constraints, `FOR UPDATE`. |
 | App server         | **uvicorn** (dev) / **gunicorn + uvicorn workers** (compose) | Standard. |
 | Load balancer demo | **nginx** in front of 2 app replicas      | Proves the multi-instance requirement locally. |
-| Tests              | **pytest**, FastAPI `TestClient` (httpx) | Standard. Tests run against a real Postgres, not SQLite (locking semantics matter). |
+| Tests              | **pytest**, FastAPI `TestClient` (httpx2, which Starlette now requires in place of httpx) | Standard. Tests run against a real Postgres, not SQLite (locking semantics matter). |
 | Lint/format        | **ruff**                                 | Standard, fast. |
-| Config             | `pydantic-settings`, env var `DATABASE_URL` | 12-factor. |
+| Config             | `pydantic-settings`, env var `DATABASE_URL` (required, no default in code) | 12-factor; credentials never in source. |
 
 Pin exact versions in `requirements*.txt` at implementation time.
 
@@ -158,7 +158,7 @@ All validation happens **before** opening a DB transaction (cheap rejections nev
 | `payments[].payee_firm_uuid` | required; valid UUID; normalized; must differ from payer |
 | `payments[].description` | required string; stripped length `1..1000` |
 
-Amount → cents conversion (`app/money.py`), **no floats anywhere**:
+Amount → cents conversion (`app/utils/money.py`), **no floats anywhere**:
 
 ```
 "300"      -> 30000
@@ -251,43 +251,75 @@ After exhaustion → 503. With ordered locking deadlocks should not happen; the 
 
 ## 7. Code layout
 
+One responsibility per package. Files marked *(later)* are created by the implementation step that needs them.
+
 ```
 app/
-  __init__.py
-  main.py        # FastAPI app factory, routes, exception handlers → error JSON
-  config.py      # Settings (DATABASE_URL, MAX_PAYMENTS_PER_REQUEST, pool size)
-  db.py          # SQLAlchemy engine (pool_pre_ping=True), get_connection dependency
-  schemas.py     # Pydantic request/response models + validators
-  money.py       # parse_amount_to_cents(str) -> int; format helpers
-  errors.py      # DomainError(code, message, details) + subclasses
-  service.py     # create_bulk_payment(conn_factory, payer_uuid, payments) -> result; retry loop; all SQL
+  main.py                          # create_app(): wires routers, error handlers, engine
+  core/
+    config.py                      # DatabaseSettings (DATABASE_URL required, pool size), ApiSettings (MAX_PAYMENTS_PER_REQUEST)
+    database.py        (later)     # SQLAlchemy engine (pool_pre_ping=True), connection helpers
+    exceptions.py                  # DomainError + subclasses (one `code` each), TransientDbError
+  models/              (later)
+    firm.py                        # SQLAlchemy Core Table for `firms`
+    payment.py                     # SQLAlchemy Core Table for `payments`
+  schemas/
+    types.py                       # shared field types: FirmUuid, Amount, Description
+    bulk_payment.py                # BulkPaymentIn / PaymentIn, BulkPaymentOut / PaymentOut
+    firm.py            (later)     # FirmOut
+  repositories/        (later)
+    firm_repository.py             # lock_by_uuids (FOR UPDATE, ordered), get_by_uuid, debit, credit_many
+    payment_repository.py          # insert_many ... RETURNING id
+  services/            (later)
+    bulk_payment_service.py        # create_bulk_payment(): checks, one transaction, retry loop
+  api/
+    error_handlers.py              # exceptions → {"error": {...}} JSON
+    dependencies.py    (later)     # engine/service providers for routes
+    routes/            (later)
+      health.py                    # GET /health
+      firms.py                     # GET /firms/{uuid}
+      bulk_payments.py             # POST /bulk-payments
+  utils/
+    money.py                       # parse_amount_to_cents(str) -> int, format_cents
 db/
+  000_create_test_db.sql           # CREATE DATABASE payments_test (compose init only)
   001_schema.sql
   002_seed.sql
-  000_create_test_db.sql   # CREATE DATABASE payments_test (compose init only)
 tests/
-  conftest.py              # engine on test DB, apply schema, truncate+seed per test, TestClient
-  test_money.py
-  test_validation.py
-  test_bulk_payments_api.py
-  test_concurrency.py
+  samples.py                       # seed UUIDs and the assignment's sample request
+  unit/                            # no database
+    test_money.py
+    test_schemas.py
+    test_error_handlers.py
+  integration/                     # real Postgres (payments_test)
+    conftest.py        (later)     # engine, apply schema, truncate+seed per test, TestClient
+    test_validation.py (later)
+    test_bulk_payments_api.py (later)
+    test_bulk_payment_service.py (later)
+    test_concurrency.py (later)
 scripts/
-  sample_request.json      # the assignment's sample request
-  demo.sh                  # reset DB, POST sample, print balances
-  concurrency_demo.sh      # fire parallel requests at nginx (2 replicas)
+  sample_request.json              # the assignment's sample request
+  demo.sh                          # reset DB, POST sample, print balances
+  concurrency_demo.sh              # fire parallel requests at nginx (2 replicas)
 Dockerfile
-docker-compose.yml         # postgres, app (2 replicas), nginx
+docker-compose.yml                 # postgres, app (2 replicas), nginx
 nginx.conf
 Makefile
 requirements.txt
 requirements-dev.txt
-pyproject.toml             # ruff + pytest config
+pyproject.toml                     # ruff + pytest config
 README.md
-ai-logs/                   # raw, unedited AI session exports
+ai-logs/                           # raw, unedited AI session exports
 ```
 
-Layering rule: `main.py` (HTTP) → `service.py` (transaction + SQL) → DB. `service.py` knows nothing about HTTP;
-it raises `DomainError`s that `main.py` maps to 422. This keeps the core testable without HTTP.
+Layering rule: `routes` (HTTP) → `services` (business rules, transaction boundary, retries) → `repositories`
+(SQL only, take an open connection, never commit) → DB.
+
+- Routes parse with `schemas`, call one service function, and shape the response. No SQL, no business rules.
+- Services know nothing about HTTP. They raise `DomainError`s that `api/error_handlers.py` maps to 422.
+- Repositories hold every SQL statement, so the locking in §6.2 is in one place. They use the Core tables in
+  `models/`; the SQL files in `db/` stay the source of truth for DDL.
+- `core` and `utils` import nothing from the layers above them.
 
 ## 8. Testing strategy
 

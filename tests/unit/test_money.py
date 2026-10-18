@@ -1,6 +1,6 @@
 import pytest
 
-from app.money import format_cents, parse_amount_to_cents
+from app.utils.money import format_cents, parse_amount_to_cents
 
 
 @pytest.mark.parametrize(

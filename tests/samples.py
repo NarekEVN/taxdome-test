@@ -1,0 +1,12 @@
+PINECREST = "3f1c9a2e-7b4d-4c1e-9a55-2d8e6f0b7c41"
+LOPEZ = "8b2e4c71-0d3a-4f6e-b1c9-5a7d2e9f4c10"
+NAIR = "e5f18b3c-2a9d-4c07-8e6b-1d4a7f9c3b25"
+
+SAMPLE_REQUEST = {
+    "payer_firm_uuid": PINECREST,
+    "payments": [
+        {"amount": "6250", "payee_firm_uuid": NAIR, "description": "Overflow returns, August 2026"},
+        {"amount": "5800.5", "payee_firm_uuid": NAIR, "description": "Amended returns, August 2026"},
+        {"amount": "1200.75", "payee_firm_uuid": LOPEZ, "description": "Bookkeeping cleanup, 3 clients"},
+    ],
+}
