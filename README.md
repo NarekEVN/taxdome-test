@@ -1,0 +1,230 @@
+# Bulk firm payment service
+
+A web service that takes one bulk payment request from a firm and applies it **all or nothing**. If the payer's
+balance covers the sum of the payments, it stores every payment, debits the payer, credits each payee and returns
+`201`. Otherwise nothing changes and it returns `422`. It is correct when several load-balanced instances run at once.
+
+Python 3.11 · FastAPI · SQLAlchemy 2 Core + psycopg 3 · PostgreSQL 16 · nginx · pytest.
+
+Detailed design: [docs/TECH_SPEC.md](docs/TECH_SPEC.md). Step-by-step build log: [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md).
+
+---
+
+## How to run and verify
+
+Prerequisites: Docker (with Compose v2), `make`, `curl`, Python 3.11 (for the tests and the demo scripts' JSON
+formatting).
+
+```bash
+git clone https://github.com/NarekEVN/taxdome-test.git && cd taxdome-test
+make install          # .venv + dev dependencies, and .env created from .env.example
+make up               # Postgres + 2 app instances + nginx on http://localhost:8080
+make demo             # the assignment's sample request through nginx, checks the balances
+make concurrency-demo # 40 parallel payments across both instances, checks nothing overdraws
+make test             # 129 tests: unit + integration against the real Postgres
+```
+
+`make` alone lists every target. `make reset` deletes the database volume and starts fresh.
+
+### Expected result of `make demo`
+
+| Firm                | Before     | After      |
+|---------------------|------------|------------|
+| Pinecrest CPA Group | $50,000.00 | $36,748.75 |
+| Lopez Bookkeeping   | $500.00    | $1,700.75  |
+| Nair Tax Services   | $2,000.00  | $14,050.50 |
+
+Then a request Lopez can't cover gets `422 insufficient_funds`, and the balances stay the same. The script exits
+non-zero if any balance is off.
+
+### By hand
+
+```bash
+curl -i -X POST localhost:8080/bulk-payments -H 'Content-Type: application/json' -d @scripts/sample_request.json
+curl localhost:8080/firms/3f1c9a2e-7b4d-4c1e-9a55-2d8e6f0b7c41     # balance_cents: 3674875
+```
+
+Every response carries `X-Instance: <host>:<pid>`, so you can see which instance and worker served it.
+
+## The approach
+
+### The hard part: concurrency across instances
+
+Instances share nothing but the database, so the database is the only place that can coordinate them. No
+in-process locks, no Redis. Each request is **one transaction** (READ COMMITTED) with **pessimistic row locks taken in a
+fixed global order** ([bulk_payment_service.py](app/services/bulk_payment_service.py), [firm_repository.py](app/repositories/firm_repository.py)):
+
+1. `SELECT id, uuid, balance_cents FROM firms WHERE uuid IN (payer, payees...) ORDER BY id FOR UPDATE`
+2. Check that the payer and every payee exist, and that `balance >= total`. Otherwise raise and roll back → `422`.
+3. Insert all payments in one statement, `RETURNING id`, in request order.
+4. `UPDATE firms SET balance_cents = balance_cents - total WHERE id = payer`
+5. Credit all payees in one `UPDATE ... FROM (VALUES ...)`, with duplicate payees summed first.
+6. `COMMIT` → `201`.
+
+Why this holds up:
+
+| Race | What prevents it |
+|------|------------------|
+| Double spend / overdraft: two requests from one payer read the same balance | The payer row is locked before its balance is read. The second request waits, then sees the new balance. |
+| Lost credit: two payers credit one firm | All writes are relative (`balance = balance ± x`) on rows we hold locks on. |
+| Deadlock: A pays B while B pays A | Every transaction locks its rows in ascending `id` order in a single statement, so no wait cycle can form. |
+| Partial write: crash halfway | Single transaction. |
+| A logic bug anyway | `CHECK (balance_cents >= 0)` in the schema makes an overdraft impossible to commit. |
+
+Deadlock (`40P01`) and serialization failure (`40001`) are retried up to 3 times with 10–50 ms jitter, as a safety net.
+If they keep failing, the response is `503` with `Retry-After: 1`. Business rejections are never retried. Locks are per
+firm row, so unrelated firms never wait on each other.
+
+Alternatives considered (details in [TECH_SPEC §6.3](docs/TECH_SPEC.md)):
+- **Conditional `UPDATE ... WHERE balance >= total`:** correct for the payer, but the payee rows still get locked
+  in arbitrary order, so cycles can deadlock.
+- **`SERIALIZABLE` with retries:** correct, but aborts more often under contention.
+- **Optimistic version column:** needs a schema change and retry loops.
+- **Advisory locks:** protect only the payer.
+- **Redis or app-level locks:** extra infrastructure, and the database still has to be right.
+
+### Layout
+
+```
+app/
+  api/            routes/ (health, firms, bulk_payments), error_handlers, dependencies, middleware
+  services/       bulk_payment_service: business rules, transaction boundary, retries
+  repositories/   firm_repository, payment_repository: every SQL statement, take a connection, never commit
+  models/         SQLAlchemy Core tables (db/001_schema.sql stays the DDL source of truth)
+  schemas/        Pydantic request/response models and shared field types
+  core/           config (env only), database engine, domain exceptions
+  utils/          money: dollar string ⇄ integer cents
+db/               000 test DB, 001 schema, 002 seed (run by Postgres on first start)
+tests/unit/       no database
+tests/integration/ real Postgres (payments_test), fresh seed for every test
+scripts/          demo.sh, concurrency_demo.sh, reset_db.sh, sample_request.json
+```
+
+Dependencies only point down: routes → services → repositories → DB. Services know nothing about HTTP. They raise
+domain errors, and `api/error_handlers.py` turns those into JSON.
+
+### API
+
+`POST /bulk-payments`: the body is exactly the assignment's format. `201` returns the created payments in request
+order:
+
+```json
+{ "payer_firm_uuid": "3f1c…", "total_amount_cents": 1325125,
+  "payments": [{ "id": 1, "payee_firm_uuid": "e5f1…", "amount_cents": 625000, "description": "Overflow returns, August 2026" }, …] }
+```
+
+Every rejection has the same shape: `{"error": {"code": "...", "message": "...", "details": [...]}}`.
+
+| Status | `code` | When |
+|--------|--------|------|
+| 422 | `validation_error` | Malformed JSON, wrong types, unknown or missing fields, bad amount or UUID, 0 or more than 1000 payments, empty description |
+| 422 | `unknown_payer_firm` / `unknown_payee_firm` | UUID not in `firms` (`details` lists the unknown payees) |
+| 422 | `self_payment` | A payee is the payer |
+| 422 | `insufficient_funds` | Balance < sum of amounts: the denial the assignment asks for |
+| 503 | `service_unavailable` | Database unreachable, or deadlock/serialization retries used up |
+
+Helper endpoints for verification: `GET /health` and `GET /firms/{uuid}` (balance lookup without psql).
+
+## Testing
+
+129 tests. `make test` runs them in about 3 s against a real Postgres. SQLite would not do, because the row-locking
+semantics are the point.
+
+| File | What it proves |
+|------|----------------|
+| `unit/test_money.py` | Exact dollar → cents parsing, with no floats. Rejects `1.234`, `.5`, `1e3`, `5\n`, `"٣"` (non-ASCII digit), numbers instead of strings, zero, 13+ digits. |
+| `unit/test_schemas.py`, `unit/test_error_handlers.py`, `unit/test_config.py` | Every validation rule; the error shape for every status; `DATABASE_URL` is required. |
+| `integration/test_bulk_payment_service.py` | The assignment sample, ids in request order (200 payments), exact-balance payment, one cent short, unknown payer and payees, self-payment, the DB `CHECK` stopping a direct overdraft, retries on deadlock, giving up after 3 attempts, no retries for business errors. |
+| `integration/test_bulk_payments_api.py`, `test_validation.py` | The same over HTTP: exact response bodies; every `422` code leaves the DB untouched; sending the sample 4 times gives 201, 201, 201, 422. |
+| `integration/test_concurrency.py` | 20–50 threads, each on its own connection (= separate instances), released together by a barrier. **No overdraft:** $100 balance, 20 × $10 at once → exactly 10 succeed. **No deadlock:** A↔B cycles, 50 requests, all 201, zero retries. **Money is conserved:** random bulk requests → total unchanged, and each firm's balance matches its payment rows. **Lock order:** `EXPLAIN` of the real query shows `LockRows` above `Sort (id)`. |
+| `integration/test_models.py` | The Core table definitions match the real schema. |
+
+**Do the concurrency tests catch anything?** I swapped the lock query for weakened versions:
+- **Without `FOR UPDATE`, all three race tests fail.** Overdrafts are stopped only by the `CHECK` constraint, as
+  500s. A↔B cycles deadlock and use up the retries.
+- **Without `ORDER BY id`, the race tests still pass.** One statement over 3 rows scans in the same order every
+  time. That's why the `EXPLAIN` test exists, and it does fail without the `ORDER BY`.
+
+## Decisions and deviations
+
+- **Money as `BIGINT` cents** instead of the assignment's `INTEGER`. A 32-bit int caps at about $21.4M, which a big
+  practice's balance can pass.
+- **Schema additions:** `CHECK (balance_cents >= 0)`, `CHECK (amount_cents > 0)`, `CHECK (payer <> payee)`, foreign
+  keys, `UNIQUE (uuid)` and `payments.created_at`. They only add integrity and audit info; no column was changed or
+  removed.
+- **All input problems return `422`**, told apart by `code`. That's simpler for clients and matches FastAPI's default.
+  The alternative would be 400 for malformed JSON and 404 for an unknown payer.
+- **`POST /bulk-payments`:** a plural noun, hyphenated, per REST naming conventions.
+- **Payment ids in request order** come from SQLAlchemy's `sort_by_parameter_order=True`. Postgres doesn't promise
+  `RETURNING` order for multi-row inserts on its own.
+- **No connection strings in code.** `DATABASE_URL` is a required setting with no default. Compose reads every
+  credential from `.env`, with generic `postgres` fallbacks.
+- **uvicorn `--workers 2`, not gunicorn.** gunicorn's `UvicornWorker` is deprecated, and uvicorn's own supervisor
+  restarts dead workers.
+- **nginx never resends a POST** to the second instance once it reached the first, so a slow payment can't be
+  applied twice.
+
+## Issues I ran into
+
+- **The Postgres healthcheck reported healthy before the seed had run.** While the init scripts run, Postgres runs a
+  temporary server that listens only on the Unix socket, and `pg_isready` checked the socket. Fixed by checking over
+  TCP (`-h 127.0.0.1`).
+- **Python's `\d` matches non-ASCII digits,** so `"٣"` passed a naive amount regex, and `$` lets a trailing `\n`
+  through. Fixed with `[0-9]` and `fullmatch`.
+- **The concurrency tests couldn't tell sorted from unsorted locking** (see Testing). Fixed by asserting on the query
+  plan instead.
+- **Dependencies moved under me:** Starlette's test client now wants `httpx2`, and `uvicorn.workers` is deprecated.
+  I followed both.
+- **Init scripts run only on an empty volume,** so changes to `db/*.sql` need `make reset`. Likewise, Postgres
+  ignores changed `POSTGRES_*` values once the volume exists.
+- **`cp -n` exits non-zero on macOS** when the target exists, which broke an idempotent `make install`. Replaced with
+  `test -f .env || cp …`.
+- **Right after startup, nginx sent the first few requests to one instance.** It didn't recur and nothing was logged.
+  Later runs split about evenly.
+
+## Assumptions
+
+1. Balances start non-negative and can never go negative.
+2. A firm can't pay itself.
+3. Duplicate payees in one request are allowed (the sample pays Nair twice). Each entry is its own row; credits are
+   summed.
+4. `description` is required, 1–1000 characters after trimming.
+5. `amount` must be a JSON string; JSON numbers are rejected to avoid float rounding. At most 2 decimals, at most 12
+   integer digits, greater than 0.
+6. UUIDs are matched case-insensitively (lowercased) and must be in the standard hyphenated form.
+7. At most 1000 payments per request (`MAX_PAYMENTS_PER_REQUEST`).
+8. Authentication is out of scope. In production the payer must come from the authenticated caller, never from the
+   body.
+9. USD only.
+
+## Possible improvements
+
+- **Idempotency-Key header.** A client that retries after a timeout can pay twice today. Store the key, a request hash
+  and the response in the same transaction, and replay the stored response for a repeated key.
+- **Authentication:** derive `payer_firm_uuid` from the caller's identity.
+- **A `bulk_payments` batch table,** so the rows of one request are grouped for audit and reporting.
+- **A double-entry ledger** (immutable entries, balances derived or cached) instead of mutable balances.
+- **Hot-account contention:** many payers crediting one big firm queue up on its row. Options are sub-balances or
+  applying credits asynchronously.
+- **Operations:** Alembic migrations, structured logs with request IDs, metrics (latency, 422 rate, retry count), rate
+  limiting.
+
+## How I worked, and AI usage
+
+- **Tools:** Claude Code (desktop app) for planning and implementation.
+- **Workflow:** the tech spec and a step-by-step implementation plan came first (drafted with Claude Code, then
+  reviewed and edited by me). Then I built one plan step per commit. Each step ended with its tests, lint and a manual check, and I reviewed and committed every step myself. The
+  commit history follows the plan's steps.
+- **Where I changed course on the AI's output:**
+  - The endpoint path, renamed to follow REST conventions.
+  - A full package split (api / services / repositories / models / schemas / core / utils) instead of flat modules.
+  - No database URL in code, not even as a default.
+  - No literal credentials in `docker-compose.yml`.
+- **Logs:** the raw transcripts are kept private. [ai-logs/README.md](ai-logs/README.md) summarizes the sessions:
+  what the AI did in each phase, where I steered it, and the problems it caught.
+
+## Two quick questions
+
+**How much time did you spend on this task?** 3h to 6h
+
+**How proud are you of your work?** Good enough

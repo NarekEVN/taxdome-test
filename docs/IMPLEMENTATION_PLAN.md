@@ -20,8 +20,8 @@ Goal: an empty but installable, lintable, testable Python project.
 - [ ] `requirements-dev.txt`: `-r requirements.txt`, `pytest`, `httpx`, `ruff`.
 - [ ] `pyproject.toml`: ruff config (line length, rule set `E,F,I,B,UP`), pytest config (`testpaths = ["tests"]`).
 - [ ] Empty package `app/__init__.py`, `tests/__init__.py` (or none, with `pythonpath = ["."]` in pytest config).
-- [ ] `ai-logs/` with a short `README.md` saying which tool (Claude Code) and that logs are raw exports. Export
-      this and every later session there as you go; that's much easier than reconstructing them at the end.
+- [ ] `ai-logs/` with a `README.md` naming the tool (Claude Code) and summarizing how it was used.
+      **Decided later:** raw transcripts are kept private; `ai-logs/README.md` holds a generic summary instead.
 
 Verify: `pip install -r requirements-dev.txt && ruff check . && pytest` (0 tests collected, exit code 5 is fine).
 
@@ -276,13 +276,17 @@ Required by the assignment; reuse TECH_SPEC sections rather than rewriting them.
 - [ ] AI usage: tools named, where each fit, link to `ai-logs/`.
 - [ ] The two closing questions: time spent and how proud you are.
 
+**Result:** README.md written. Every link, `make` target and by-hand command in it was checked against the running
+stack. The author filled in the two closing questions. `ai-logs/README.md` holds a summary of the AI sessions; the
+raw transcripts are kept private.
+
 Commit: `docs: README`
 
 ## Step 11 — Final check, then stretch (optional)
 
 - [ ] Fresh-clone test: `git clone` into `/tmp`, `make up && make test && make demo`.
 - [ ] `ruff check . && ruff format --check .` clean.
-- [ ] Every AI session exported into `ai-logs/`, unedited.
+- [ ] `ai-logs/README.md` summary is up to date with the final sessions.
 - [ ] Stretch, only if time allows: `Idempotency-Key` per TECH_SPEC §9 (separate commit, own tests: replay returns
       the same response, same key + different body → 422, concurrent same-key requests → one payment).
 

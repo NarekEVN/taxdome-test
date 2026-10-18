@@ -310,7 +310,7 @@ requirements.txt
 requirements-dev.txt
 pyproject.toml                     # ruff + pytest config
 README.md
-ai-logs/                           # raw, unedited AI session exports
+ai-logs/                           # summary of the AI-assisted sessions (raw transcripts kept private)
 ```
 
 Layering rule: `routes` (HTTP) → `services` (business rules, transaction boundary, retries) → `repositories`
