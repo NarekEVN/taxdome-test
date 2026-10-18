@@ -63,6 +63,16 @@ CREATE TABLE payments (
 
 CREATE INDEX payments_payer_firm_id_idx ON payments (payer_firm_id);
 CREATE INDEX payments_payee_firm_id_idx ON payments (payee_firm_id);
+
+-- Idempotency (§6.6): one row per successful bulk payment sent with an Idempotency-Key header.
+CREATE TABLE idempotency_keys (
+    payer_firm_id INTEGER     NOT NULL REFERENCES firms(id),
+    key           TEXT        NOT NULL,
+    request_hash  TEXT        NOT NULL,
+    response_body JSONB       NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (payer_firm_id, key)
+);
 ```
 
 ```sql
@@ -116,6 +126,9 @@ Request (`Content-Type: application/json`):
 
 Payments are returned in request order.
 
+Optional header `Idempotency-Key` (1–255 printable ASCII characters, no spaces). Repeating a successful request with the
+same key returns the stored `201` body with `Idempotent-Replayed: true` and pays nothing again. See §6.6.
+
 **422 Unprocessable Entity** — every client-side rejection, with a machine-readable code:
 
 ```json
@@ -129,6 +142,7 @@ Payments are returned in request order.
 | `unknown_payee_firm`   | One or more `payee_firm_uuid` not in `firms`. `details` lists them. |
 | `self_payment`         | A payment's payee equals the payer. |
 | `insufficient_funds`   | Payer balance < sum of amounts. **The case the assignment requires.** |
+| `idempotency_key_reused` | The `Idempotency-Key` was already used by this payer with a different request. |
 
 Other statuses:
 
@@ -246,9 +260,33 @@ After exhaustion → 503. With ordered locking deadlocks should not happen; the 
 
 ### 6.5 Request handling and idempotency
 
-- The service does **not** auto-retry a request after a commit; a client retry after a timeout could double-pay.
-  Proper fix is an `Idempotency-Key` header (optional stretch, §9).
+- The service does **not** auto-retry a request after a commit. A client retry after a timeout would double-pay
+  unless the client sends an `Idempotency-Key` (§6.6).
 - Request handler must not hold the transaction open while doing anything other than the statements above.
+
+### 6.6 Idempotency-Key
+
+Inside the same transaction as §6.2, right after step 1 (so the payer row is already locked):
+
+1. Resolve the payer (unknown → `unknown_payer_firm`, as before).
+2. Look up `(payer_firm_id, key)` in `idempotency_keys`.
+   - Found, same `request_hash` → return the stored result, marked replayed. No balance check, no writes.
+   - Found, different `request_hash` → `422 idempotency_key_reused`.
+3. Not found → continue with the payee and balance checks and steps 3–5 of §6.2, then insert the
+   `idempotency_keys` row with the result. It commits together with the payments, or not at all.
+
+Decisions:
+- **Scoped per payer.** The key is unique per `(payer_firm_id, key)`, so two firms can't collide.
+- **Race-free for free.** Concurrent requests with the same key share the payer, so they queue on the payer's row
+  lock. Under READ COMMITTED, the waiting transaction's next statement sees the committed key row and replays it. The
+  primary key is a backstop.
+- **Only successes are stored.** A rejected request writes nothing, so retrying it with the same key re-evaluates it.
+  For example, it succeeds after the balance is topped up. A replay returns the stored `201` even if the balance has
+  since run out.
+- **`request_hash`** is SHA-256 of the *normalized* request: lowercase UUIDs, amounts in cents, trimmed descriptions.
+  `"300"` and `"300.00"` therefore count as the same request.
+- **No `response_status` column.** Every stored response is a `201`, and the service layer stays HTTP-free.
+- **Keys never expire** here. In production, delete rows older than e.g. 24 h with a periodic job.
 
 ## 7. Code layout
 
@@ -264,6 +302,7 @@ app/
   models/              (later)
     firm.py                        # SQLAlchemy Core Table for `firms`
     payment.py                     # SQLAlchemy Core Table for `payments`
+    idempotency_key.py             # SQLAlchemy Core Table for `idempotency_keys`
   schemas/
     types.py                       # shared field types: FirmUuid, Amount, Description
     bulk_payment.py                # BulkPaymentIn / PaymentIn, BulkPaymentOut / PaymentOut
@@ -271,6 +310,7 @@ app/
   repositories/        (later)
     firm_repository.py             # lock_by_uuids (FOR UPDATE, ordered), get_by_uuid, debit, credit_many
     payment_repository.py          # insert_many ... RETURNING id
+    idempotency_repository.py      # get, save (§6.6)
   services/            (later)
     bulk_payment_service.py        # create_bulk_payment(): checks, one transaction, retry loop
   api/
@@ -351,9 +391,7 @@ Manual/e2e: `make demo` (sample request via curl through nginx) and `scripts/con
 
 - **Authentication/authorization**: in production the payer must come from the authenticated principal, never trusted
   from the body. Assumed handled by an upstream gateway.
-- **Idempotency-Key** (stretch, if time allows): table `idempotency_keys(key TEXT, payer_firm_id INT, request_hash TEXT,
-  response_status INT, response_body JSONB, created_at, PRIMARY KEY (payer_firm_id, key))`, inserted in the same
-  transaction; replay returns the stored response; same key + different body → 422.
+- **Idempotency-Key expiry**: the header is implemented (§6.6), but keys are kept forever. Add a TTL cleanup job.
 - Group rows of one request with a `bulk_payment_id` / batch table for audit and reporting.
 - Double-entry ledger (immutable entries, balances derived/cached) instead of mutable balances.
 - Hot-account contention: many payers crediting one firm serialize on its row; options are sharded sub-balances or

@@ -287,8 +287,43 @@ Commit: `docs: README`
 - [ ] Fresh-clone test: `git clone` into `/tmp`, `make up && make test && make demo`.
 - [ ] `ruff check . && ruff format --check .` clean.
 - [ ] `ai-logs/README.md` summary is up to date with the final sessions.
-- [ ] Stretch, only if time allows: `Idempotency-Key` per TECH_SPEC §9 (separate commit, own tests: replay returns
-      the same response, same key + different body → 422, concurrent same-key requests → one payment).
+**Result (core checks):** fresh `git clone` of `1e24e6a` into a scratch folder, with the dev stack stopped:
+`make install` (created `.env` from `.env.example`), `make up` (all 4 containers healthy on a brand-new volume),
+`make test` (129 passed; 11 s on the first run because of bytecode compiling, then 2.4 s), `make demo` (OK),
+`make concurrency-demo` (20 × 201, 20 × 422, total money unchanged, both instances served requests), `make lint`
+(clean). No files the clone needs are untracked. The clone's containers, volume and image were then removed, and the
+dev stack was restored.
+
+- [x] Stretch: done as Step 12.
+
+## Step 12 — Idempotency-Key (stretch)
+
+Design: TECH_SPEC §6.6.
+
+- [x] `idempotency_keys` table in `db/001_schema.sql`, `app/models/idempotency_key.py`,
+      `app/repositories/idempotency_repository.py` (`get`, `save`), `IdempotencyKeyReused` (422).
+- [x] Service: optional `idempotency_key`. Lookup after the payer row is locked; save in the same transaction;
+      `BulkPaymentResult.replayed`.
+- [x] Route: optional `Idempotency-Key` header (1–255 printable ASCII), and `Idempotent-Replayed: true` on replays.
+- [x] `tests/integration/test_idempotency.py` (14 tests):
+  - repeat pays once;
+  - no key behaves as before;
+  - a normalized-equal body counts as the same;
+  - a different body gives 422;
+  - keys are scoped per payer;
+  - replay works after funds run out;
+  - rejections aren't stored;
+  - 20 concurrent same-key requests → 1 payment and 19 replays;
+  - over the API: replay headers, reuse → 422, invalid keys → 422.
+
+**Result:** 143 tests pass, and the concurrent same-key test passed 5 of 5 runs. Through nginx with `make reset`: the
+first request was served by app1, and repeats served by app2 were replayed, with only 3 payment rows. A different
+body with the same key got `idempotency_key_reused`. Both demos and lint pass. `scripts/reset_db.sh` now silences the
+`truncate cascades` notice.
+
+Note: the table lives in `001_schema.sql`, so an existing dev volume needs `make reset` to get it.
+
+Commit: `feat: Idempotency-Key header for safe client retries`
 
 ---
 

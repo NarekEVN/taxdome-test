@@ -24,6 +24,7 @@ The raw transcripts are kept private. This is a summary of how the work went.
 | Step 7 | Concurrency tests (overdraft, deadlock cycles, money conservation). Weakened the lock query to confirm the tests catch races, then added a query-plan test where they didn't. |
 | Steps 8–9 | Dockerfile, two app instances behind nginx, Makefile and self-checking demo scripts. |
 | Step 10 | README written as a PR description. |
+| Steps 11–12 | Fresh-clone check of the whole workflow. Stretch goal: `Idempotency-Key` header (stored with the payments in the same transaction, scoped per payer, race-free through the payer row lock), with tests for concurrent same-key requests. |
 
 ## Where I steered or corrected it
 

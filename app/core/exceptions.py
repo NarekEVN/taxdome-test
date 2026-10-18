@@ -27,3 +27,7 @@ class InsufficientFunds(DomainError):
 
 class TransientDbError(Exception):
     """Deadlock or serialization failure that persisted after all retries."""
+
+
+class IdempotencyKeyReused(DomainError):
+    code = "idempotency_key_reused"

@@ -17,3 +17,12 @@ CREATE TABLE payments (
 
 CREATE INDEX payments_payer_firm_id_idx ON payments (payer_firm_id);
 CREATE INDEX payments_payee_firm_id_idx ON payments (payee_firm_id);
+
+CREATE TABLE idempotency_keys (
+    payer_firm_id INTEGER     NOT NULL REFERENCES firms(id),
+    key           TEXT        NOT NULL,
+    request_hash  TEXT        NOT NULL,
+    response_body JSONB       NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (payer_firm_id, key)
+);

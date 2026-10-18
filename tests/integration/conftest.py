@@ -34,7 +34,7 @@ def database_url() -> str:
 def engine(database_url):
     engine = create_engine(database_url)
     with engine.begin() as conn:
-        conn.exec_driver_sql("DROP TABLE IF EXISTS payments, firms CASCADE")
+        conn.exec_driver_sql("DROP TABLE IF EXISTS idempotency_keys, payments, firms CASCADE")
         conn.exec_driver_sql((DB_DIR / "001_schema.sql").read_text())
     yield engine
     engine.dispose()

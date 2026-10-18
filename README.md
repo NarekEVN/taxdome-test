@@ -21,7 +21,7 @@ make install          # .venv + dev dependencies, and .env created from .env.exa
 make up               # Postgres + 2 app instances + nginx on http://localhost:8080
 make demo             # the assignment's sample request through nginx, checks the balances
 make concurrency-demo # 40 parallel payments across both instances, checks nothing overdraws
-make test             # 129 tests: unit + integration against the real Postgres
+make test             # 143 tests: unit + integration against the real Postgres
 ```
 
 `make` alone lists every target. `make reset` deletes the database volume and starts fresh.
@@ -45,6 +45,14 @@ curl localhost:8080/firms/3f1c9a2e-7b4d-4c1e-9a55-2d8e6f0b7c41     # balance_cen
 ```
 
 Every response carries `X-Instance: <host>:<pid>`, so you can see which instance and worker served it.
+
+Safe retries: send an `Idempotency-Key` header and repeat the request. The repeat returns the same `201` body with
+`Idempotent-Replayed: true` and doesn't pay again, even when it lands on the other instance:
+
+```bash
+curl -i -X POST localhost:8080/bulk-payments -H 'Content-Type: application/json' -H 'Idempotency-Key: demo-1' \
+  -d @scripts/sample_request.json        # run twice: second response has Idempotent-Replayed: true
+```
 
 ## The approach
 
@@ -89,7 +97,7 @@ Alternatives considered (details in [TECH_SPEC §6.3](docs/TECH_SPEC.md)):
 app/
   api/            routes/ (health, firms, bulk_payments), error_handlers, dependencies, middleware
   services/       bulk_payment_service: business rules, transaction boundary, retries
-  repositories/   firm_repository, payment_repository: every SQL statement, take a connection, never commit
+  repositories/   firm, payment, idempotency repositories: every SQL statement, take a connection, never commit
   models/         SQLAlchemy Core tables (db/001_schema.sql stays the DDL source of truth)
   schemas/        Pydantic request/response models and shared field types
   core/           config (env only), database engine, domain exceptions
@@ -106,7 +114,7 @@ domain errors, and `api/error_handlers.py` turns those into JSON.
 ### API
 
 `POST /bulk-payments`: the body is exactly the assignment's format. `201` returns the created payments in request
-order:
+order. The optional `Idempotency-Key` header makes retries safe (below).
 
 ```json
 { "payer_firm_uuid": "3f1c…", "total_amount_cents": 1325125,
@@ -121,13 +129,29 @@ Every rejection has the same shape: `{"error": {"code": "...", "message": "...",
 | 422 | `unknown_payer_firm` / `unknown_payee_firm` | UUID not in `firms` (`details` lists the unknown payees) |
 | 422 | `self_payment` | A payee is the payer |
 | 422 | `insufficient_funds` | Balance < sum of amounts: the denial the assignment asks for |
+| 422 | `idempotency_key_reused` | This payer already used the `Idempotency-Key` with a different request |
 | 503 | `service_unavailable` | Database unreachable, or deadlock/serialization retries used up |
 
 Helper endpoints for verification: `GET /health` and `GET /firms/{uuid}` (balance lookup without psql).
 
+**Idempotency-Key** (optional, 1–255 printable ASCII characters). The key is checked inside the payment
+transaction, right after the payer row is locked:
+- **Same key, same request:** the stored result is replayed with `Idempotent-Replayed: true`. Nothing is paid again,
+  even if the balance has since run out.
+- **Same key, different request:** `422 idempotency_key_reused`.
+
+Other rules:
+- **Keys are scoped per payer.**
+- **Only successful requests are stored.** A rejected request can be retried with the same key.
+- **No race between concurrent same-key requests:** they queue on the payer's lock, so the second one sees the first
+  one's result.
+- **"Same request" means the same after normalization:** `"300"` = `"300.00"`, and UUIDs are case-insensitive.
+
+Details: [TECH_SPEC §6.6](docs/TECH_SPEC.md).
+
 ## Testing
 
-129 tests. `make test` runs them in about 3 s against a real Postgres. SQLite would not do, because the row-locking
+143 tests. `make test` runs them in about 3 s against a real Postgres. SQLite would not do, because the row-locking
 semantics are the point.
 
 | File | What it proves |
@@ -137,6 +161,7 @@ semantics are the point.
 | `integration/test_bulk_payment_service.py` | The assignment sample, ids in request order (200 payments), exact-balance payment, one cent short, unknown payer and payees, self-payment, the DB `CHECK` stopping a direct overdraft, retries on deadlock, giving up after 3 attempts, no retries for business errors. |
 | `integration/test_bulk_payments_api.py`, `test_validation.py` | The same over HTTP: exact response bodies; every `422` code leaves the DB untouched; sending the sample 4 times gives 201, 201, 201, 422. |
 | `integration/test_concurrency.py` | 20–50 threads, each on its own connection (= separate instances), released together by a barrier. **No overdraft:** $100 balance, 20 × $10 at once → exactly 10 succeed. **No deadlock:** A↔B cycles, 50 requests, all 201, zero retries. **Money is conserved:** random bulk requests → total unchanged, and each firm's balance matches its payment rows. **Lock order:** `EXPLAIN` of the real query shows `LockRows` above `Sort (id)`. |
+| `integration/test_idempotency.py` | A repeat pays once; normalized-equal bodies count as the same; a different body → 422; keys are scoped per payer; replay works after funds run out; rejections aren't stored; **20 concurrent requests with the same key → 1 payment, 19 replays**; replay headers and key validation over HTTP. |
 | `integration/test_models.py` | The Core table definitions match the real schema. |
 
 **Do the concurrency tests catch anything?** I swapped the lock query for weakened versions:
@@ -161,6 +186,8 @@ semantics are the point.
   credential from `.env`, with generic `postgres` fallbacks.
 - **uvicorn `--workers 2`, not gunicorn.** gunicorn's `UvicornWorker` is deprecated, and uvicorn's own supervisor
   restarts dead workers.
+- **Idempotency-Key stores successes only,** with no `response_status` column (every stored result is a `201`). A
+  rejected request wrote nothing, so a retry should re-evaluate it rather than replay the rejection.
 - **nginx never resends a POST** to the second instance once it reached the first, so a slow payment can't be
   applied twice.
 
@@ -199,8 +226,7 @@ semantics are the point.
 
 ## Possible improvements
 
-- **Idempotency-Key header.** A client that retries after a timeout can pay twice today. Store the key, a request hash
-  and the response in the same transaction, and replay the stored response for a repeated key.
+- **Expire idempotency keys** (e.g. after 24 h) with a cleanup job. They are kept forever today.
 - **Authentication:** derive `payer_firm_uuid` from the caller's identity.
 - **A `bulk_payments` batch table,** so the rows of one request are grouped for audit and reporting.
 - **A double-entry ledger** (immutable entries, balances derived or cached) instead of mutable balances.
