@@ -113,7 +113,9 @@ Goal: a running app that talks to Postgres, and a test harness that gives each t
 - [ ] `app/api/dependencies.py`: `get_engine(request)` from `app.state`, `get_connection` (one per request, read-only use).
 - [ ] `app/api/routes/health.py`: `GET /health` → `SELECT 1` → `{"status": "ok"}` (DB down → 503).
 - [ ] `app/api/routes/firms.py`: `GET /firms/{uuid}` → `FirmOut` or 404.
-- [ ] `app/main.py`: `create_app(settings=None)` builds the engine, stores it on `app.state`, includes the routers.
+- [ ] `app/main.py`: `create_app(database_settings=None)` builds the engine, stores it on `app.state`, includes the
+      routers, disposes the engine on shutdown. No module-level `app`: importing the package never needs config,
+      and servers use the factory (`uvicorn --factory`, gunicorn `'app.main:create_app()'`).
 - [ ] `tests/integration/conftest.py`:
   - session fixture: engine on `TEST_DATABASE_URL` (read from the environment / `.env`, no default; fail with a
     clear message if unset); drop and recreate tables by running `db/001_schema.sql`.
@@ -121,7 +123,7 @@ Goal: a running app that talks to Postgres, and a test harness that gives each t
   - `client` fixture: `TestClient(create_app(test_settings))`.
   - helper `balances(engine) -> dict[int, int]` and `payment_count(engine)`.
 
-Verify: `uvicorn app.main:app --reload` → `curl localhost:8000/health`, `curl localhost:8000/firms/3f1c9a2e-7b4d-4c1e-9a55-2d8e6f0b7c41`;
+Verify: `uvicorn --factory app.main:create_app --reload` → `curl localhost:8000/health`, `curl localhost:8000/firms/3f1c9a2e-7b4d-4c1e-9a55-2d8e6f0b7c41`;
 `pytest` with a smoke test for both endpoints.
 
 Commit: `feat: app factory, DB engine, health and firm lookup endpoints`
@@ -199,7 +201,7 @@ Commit: `test: concurrency tests for overdraft, deadlock and conservation`
 Goal: the "multiple load-balanced instances" requirement runs locally.
 
 - [ ] `Dockerfile`: `python:3.11-slim`, install `requirements.txt`, copy `app/`, non-root user,
-      `CMD gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:8000`.
+      `CMD gunicorn 'app.main:create_app()' -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:8000`.
 - [ ] Compose: `app` service with `deploy.replicas: 2` (or `app1`/`app2`, which is explicit and works everywhere),
       `depends_on: db: condition: service_healthy`, `DATABASE_URL` pointing at `db:5432`.
 - [ ] `nginx.conf`: `upstream app { server app1:8000; server app2:8000; }` (or Docker DNS for replicas),
