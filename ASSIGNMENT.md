@@ -1,18 +1,10 @@
-taxdome.com 
-
-
-
 01 / 05 
 
 TA X D O M E · T E C H N I C A L C H A L L E N G E 
 
 # Firm Payments: Build a bulk payment service 
 
-Write a web service that receives bulk payment requests from a single firm 
-
-© TaxDome 2026. All rights reserved. 
-
-taxdome.com 
+Write a web service that receives bulk payment requests from a single firm
 
 02 / 05 
 
@@ -57,10 +49,6 @@ LANGUAGE Use one of: Ruby Python Go
 AI & WEB You can use any AI tools — in this case please include unedited logs of your conversations with the LLM. Don't clean them up or summarize; the raw back-and-forth is exactly what we'd like to see. 
 
 LIBRARIES Prefer commonly used libraries whenever possible. 
-
-© TaxDome 2026 · TaxDome Interview Flow 
-
-taxdome.com 
 
 03 / 05 
 
@@ -112,10 +100,6 @@ The database has two tables.
 |`uuid`|TEXT|Public identifier of the firm, used<br>in requests.|`amount_cents`<br>`description`|INTEGER<br>TEXT|Amount of the payment, in US<br>cents.<br>Description of the payment.|
 
 
-
-© TaxDome 2026 · TaxDome Interview Flow 
-
-taxdome.com 
 
 04 / 05 
 
@@ -170,10 +154,6 @@ Pinecrest pays Nair and Lopez. It can cover the $13,251.25 total, so the service
 }
 ```
 
-© TaxDome 2026 · TaxDome Interview Flow 
-
-taxdome.com 
-
 05 / 05 
 
 TECHNICAL CHALLENGE 
@@ -210,7 +190,4 @@ When you're done, send us the link to the repository.
 
 We're interested in your thought process and your approach to the problem, and we'll consider every submission, even an incomplete one. If you'd like to take extra time to improve or "finish" your solution, let us know beforehand and we'll review the final version. 
 
-© TaxDome 2026 · TaxDome Interview Flow 
-
-taxdome.com 
 
