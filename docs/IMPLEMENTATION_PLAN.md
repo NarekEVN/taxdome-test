@@ -195,6 +195,14 @@ Goal: prove TECH_SPEC §6 claims with real parallelism against real Postgres.
       `SUM(balance_cents)` unchanged, no negatives, per-firm `initial + credits − debits == final` from `payments`.
 - [ ] Sanity check the tests themselves: temporarily remove `FOR UPDATE` and confirm Test 1 fails (or the DB
       `CHECK` fires). Mention the result in the README; it's a strong signal to reviewers.
+      **Result (run via a scratch script that swaps `lock_by_uuids`; repo code untouched):**
+  - Without `FOR UPDATE`, all 3 tests fail. Test 1: 10 succeed, and the rest are stopped only by the DB
+    `CHECK (balance_cents >= 0)` as `IntegrityError` instead of a clean `insufficient_funds`. Test 2: real
+    deadlocks, retries exhausted → `TransientDbError` (the run took ~3 min, as each deadlock waits for
+    `deadlock_timeout` = 1 s). Test 3: the same errors.
+  - Without `ORDER BY id` (lock kept), Tests 1–3 still pass: one statement over 3 rows scans in the same order in
+    every transaction. So added Test 4, which checks the real query's `EXPLAIN`: `LockRows` must sit on top of
+    `Sort (id)`. It fails when `ORDER BY` is removed.
 
 Verify: `pytest tests/integration/test_concurrency.py -q` in < 10 s; run it 5–10 times in a row to check it isn't flaky.
 
