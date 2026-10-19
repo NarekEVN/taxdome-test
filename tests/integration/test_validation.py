@@ -47,6 +47,7 @@ def assert_rejected(client, engine):
         with_payment(payee_firm_uuid="nope"),
         with_payment(description="   "),
         with_payment(description="x" * 1001),
+        with_payment(description="a\x00b"),
         {"payer_firm_uuid": PINECREST},
         [],
     ],

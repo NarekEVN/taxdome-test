@@ -7,8 +7,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /srv
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+COPY requirements.txt requirements.lock ./
+RUN pip install -r requirements.txt -c requirements.lock
 
 COPY app ./app
 

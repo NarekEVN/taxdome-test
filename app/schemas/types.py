@@ -5,6 +5,8 @@ from pydantic import AfterValidator, StrictStr, StringConstraints
 
 from app.utils.money import parse_amount_to_cents
 
+# C0 control characters and DEL, except tab, newline and carriage return. Postgres TEXT rejects NUL outright.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 
 
@@ -14,6 +16,12 @@ def normalize_uuid(value: str) -> str:
     return value.lower()
 
 
+def _reject_control_chars(value: str) -> str:
+    if _CONTROL_CHARS_RE.search(value):
+        raise ValueError("must not contain control characters")
+    return value
+
+
 def _validate_amount(value: str) -> str:
     parse_amount_to_cents(value)
     return value
@@ -21,4 +29,8 @@ def _validate_amount(value: str) -> str:
 
 FirmUuid = Annotated[StrictStr, AfterValidator(normalize_uuid)]
 Amount = Annotated[StrictStr, AfterValidator(_validate_amount)]
-Description = Annotated[StrictStr, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)]
+Description = Annotated[
+    StrictStr,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=1000),
+    AfterValidator(_reject_control_chars),
+]

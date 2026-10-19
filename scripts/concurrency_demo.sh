@@ -15,9 +15,10 @@ sql() { docker compose exec -T db sh -c "psql -At -U \"\$POSTGRES_USER\" -d \"\$
 scripts/reset_db.sh
 echo "Sending $REQUESTS parallel \$25 payments from Lopez (balance \$500) to Nair via $BASE_URL ..."
 
-results=$(seq "$REQUESTS" | xargs -P "$REQUESTS" -I{} curl -s -o /dev/null -D - -X POST "$BASE_URL/bulk-payments" \
-  -H 'Content-Type: application/json' -d "$BODY" \
-  | tr -d '\r' | awk '/^HTTP/ {status = $2} tolower($1) == "x-instance:" {split($2, a, ":"); print a[1], status}')
+# One line per request: "<instance> <status>". Responses without X-Instance came from nginx itself (e.g. 502).
+results=$(seq "$REQUESTS" | xargs -P "$REQUESTS" -I{} curl -s -o /dev/null -w '%header{x-instance} %{http_code}\n' \
+  -X POST "$BASE_URL/bulk-payments" -H 'Content-Type: application/json' -d "$BODY" \
+  | awk 'NF == 1 {print "nginx", $1; next} {split($1, a, ":"); print a[1], $2}')
 
 echo
 echo "Responses by instance and status:"

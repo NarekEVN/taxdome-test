@@ -327,6 +327,37 @@ Commit: `feat: Idempotency-Key header for safe client retries`
 
 ---
 
+## Step 13 — Review fixes
+
+A staff-level review of the finished code reproduced four defects against the running stack:
+- **No DB timeouts:** a request blocked on a row lock got a 504 from nginx at 60 s, then committed anyway when the
+  lock was released.
+- **NUL in a description → 500.**
+- **nginx's 1 MB default body limit < the largest valid request (1.1 MB),** and its 413 page was HTML.
+- **18 transitive packages were unpinned.**
+
+- [x] `DatabaseSettings`: `db_lock_timeout_ms=5000`, `db_statement_timeout_ms=15000`, `db_pool_timeout_s=10`. The
+      engine passes `options=-c lock_timeout=... -c statement_timeout=...` to every connection. Tests in
+      `tests/integration/test_timeouts.py`.
+- [x] `Description` rejects C0 control characters and DEL, except tab, newline and CR.
+- [x] `nginx.conf`: `client_max_body_size 2m`, explicit `proxy_read_timeout 60s`, JSON pages for 413/502/504.
+- [x] `requirements.lock` plus `make lock` (resolved inside `python:3.11-slim`). Used as a constraints file by the
+      Dockerfile and `requirements-dev.txt`. `tests/unit/test_requirements.py` fails if the lock falls behind.
+- [x] `scripts/concurrency_demo.sh` counts every response, labeling ones without `X-Instance` as `nginx`, so a 502
+      can't silently go missing.
+
+**Result:** 154 tests pass and lint is clean. Re-running the experiments against the rebuilt stack:
+- lock held for 70 s → 503 after 5.0 s, and nothing committed after the lock was released;
+- NUL → 422;
+- the 1.1 MB request → 201;
+- a 3 MB body → JSON 413;
+- apps stopped → JSON 502; apps paused → JSON 504 at 60 s.
+
+Both demos pass. Gotcha: right after the apps come back, nginx keeps an upstream marked down for its 10 s
+`fail_timeout`, so requests in that window get 502s.
+
+Commit: `fix: DB timeouts, control chars, nginx limits and JSON errors, dependency lock`
+
 ## Suggested timeline
 
 | Block | Steps | Rough time |

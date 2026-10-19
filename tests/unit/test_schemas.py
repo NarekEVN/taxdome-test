@@ -46,6 +46,11 @@ def test_description_is_stripped():
     assert req.payments[0].description == "Referral fee"
 
 
+def test_description_keeps_tabs_newlines_and_unicode():
+    text = "Line one\n\tLine two\r\nRéf. № 42 — 税务"
+    assert BulkPaymentIn.model_validate(with_payment(description=text)).payments[0].description == text
+
+
 def test_duplicate_payees_are_allowed():
     req = BulkPaymentIn.model_validate(SAMPLE)
     assert [p.payee_firm_uuid for p in req.payments].count(NAIR) == 2
@@ -77,6 +82,9 @@ def test_max_payments_accepted():
         (with_payment(description="   "), ("payments", 0, "description")),
         (with_payment(description="x" * 1001), ("payments", 0, "description")),
         (with_payment(description=None), ("payments", 0, "description")),
+        (with_payment(description="a\x00b"), ("payments", 0, "description")),
+        (with_payment(description="a\x1bb"), ("payments", 0, "description")),
+        (with_payment(description="a\x7fb"), ("payments", 0, "description")),
         (with_payment(note="x"), ("payments", 0, "note")),
     ],
 )

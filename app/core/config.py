@@ -9,6 +9,9 @@ class DatabaseSettings(BaseSettings):
     database_url: str
     db_pool_size: int = 5
     db_max_overflow: int = 5
+    db_pool_timeout_s: int = 10
+    db_lock_timeout_ms: int = 5000
+    db_statement_timeout_ms: int = 15000
 
 
 class ApiSettings(BaseSettings):

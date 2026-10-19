@@ -36,7 +36,9 @@ Hard constraints:
 | Lint/format        | **ruff**                                 | Standard, fast. |
 | Config             | `pydantic-settings`, env var `DATABASE_URL` (required, no default in code) | 12-factor; credentials never in source. |
 
-Pin exact versions in `requirements*.txt` at implementation time.
+Direct dependencies are pinned in `requirements.txt`. Every runtime package, transitive ones included, is pinned in
+`requirements.lock` (`make lock` regenerates it inside `python:3.11-slim`), which the Dockerfile and
+`requirements-dev.txt` use as a constraints file.
 
 ## 3. Data model
 
@@ -146,8 +148,12 @@ same key returns the stored `201` body with `Idempotent-Replayed: true` and pays
 
 Other statuses:
 
-- `503 Service Unavailable` + `Retry-After: 1` — transaction still failing with a deadlock/serialization error after retries (see §6.4), or DB unreachable.
+- `503 Service Unavailable` + `Retry-After: 1` — transaction still failing with a deadlock/serialization error after
+  retries, a lock or statement timeout, connection pool exhausted, or DB unreachable (see §6.4).
 - `500` — unexpected bug (generic body, details only in logs).
+- From nginx, in the same JSON shape: `413 payload_too_large` (body over 2 MB), `502 bad_gateway` (no instance
+  answered) and `504 gateway_timeout`. For 502 and 504 the outcome is unknown; the client should retry with the
+  same `Idempotency-Key`.
 
 Decision: one status (422) for all input problems, distinguished by `code`. Simpler for clients, matches FastAPI's
 default for validation errors, and the assignment only mandates 422 for denial. (Alternative noted in README: 400 for
@@ -170,7 +176,7 @@ All validation happens **before** opening a DB transaction (cheap rejections nev
 | `payments` | required; array; `1 ≤ len ≤ 1000` (`MAX_PAYMENTS_PER_REQUEST`, configurable) |
 | `payments[].amount` | required; **must be a JSON string** (numbers rejected — avoid float precision loss); regex `^\d{1,12}(\.\d{1,2})?$`; value `> 0` |
 | `payments[].payee_firm_uuid` | required; valid UUID; normalized; must differ from payer |
-| `payments[].description` | required string; stripped length `1..1000` |
+| `payments[].description` | required string; stripped length `1..1000`; no control characters except tab, newline, CR (Postgres `TEXT` rejects NUL) |
 
 Amount → cents conversion (`app/utils/money.py`), **no floats anywhere**:
 
@@ -257,6 +263,18 @@ Lock scope is per-firm rows only, so unrelated firms never contend. Locks are he
 Wrap the transaction in a retry loop for transient errors only: SQLSTATE `40P01` (deadlock) and `40001`
 (serialization failure). Max 3 attempts, small jittered backoff (e.g. 10–50 ms). Business rejections are never retried.
 After exhaustion → 503. With ordered locking deadlocks should not happen; the retry is a safety net.
+
+Timeouts, set per connection by the engine (`DatabaseSettings`):
+
+| Setting | Default | Why |
+|---------|---------|-----|
+| `lock_timeout` | 5 s | A request waiting on a busy firm row gives up (`55P03` → 503, rolled back) instead of waiting forever. |
+| `statement_timeout` | 15 s | Caps any single statement (`57014` → 503). |
+| pool checkout timeout | 10 s | No free connection → 503 instead of a 30 s wait. |
+
+All three end a request well before nginx's 60 s `proxy_read_timeout`. Without them, a request blocked on a row lock
+outlived nginx: the client got a 504 while the payment still committed later. A retry without an
+`Idempotency-Key` would then pay twice. Lock timeouts are not retried; the client gets a clear 503 quickly.
 
 ### 6.5 Request handling and idempotency
 
@@ -404,7 +422,7 @@ Manual/e2e: `make demo` (sample request via curl through nginx) and `scripts/con
 1. All firm balances start non-negative; balances may never go negative.
 2. Paying yourself is rejected.
 3. Duplicate payees in one request are allowed and stored as separate rows.
-4. Description is required, non-empty, ≤ 1000 chars.
+4. Description is required, non-empty, ≤ 1000 chars, with no control characters other than tab, newline and CR.
 5. Amount must be a JSON string; JSON numbers are rejected.
 6. All input errors → 422 with a distinguishing `code`.
 7. UUIDs are matched case-insensitively (normalized to lowercase; seeds are lowercase).
